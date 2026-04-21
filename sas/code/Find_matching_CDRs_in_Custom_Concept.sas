@@ -3,20 +3,20 @@
  *
  * Copyright(c) 2026
  *
- * Name          : Find_matching_CDRs.sas
+ * Name          : find_matching_CDRs_in_Custom_Concept.sas
  *
  * Purpose       : find the concept definition rule (CDR) or rules in a custom concept that matches specified text
  *
  * Author        : Bruce Mills, Corey Kozak, Lois Wright
  *
  * Input(s)      : VTA project name, custom concept name, text string that matches, source data caslib,
- *                  source data table name, rowID for observation containing matching text string
+ *                  source data table name, unique row identifier for observation containing matched text string
  *
- * Output(s)     : SAS dataset in work library containing the CDRs that match the text string
+ * Output(s)     : SAS dataset in work library containing the CDR(s) that match the text string
  *
  * Dependencies  : valid inputs
  *
- * Usage         : Troubleshoot custom concept to find CDRs matching text string provided
+ * Usage         : Troubleshoot custom concept to find CDR(s) matching text string provided
  *
  * Expected      :  WARNING:  Apparent symbolic reference LIMIT not resolved.
  *                  WARNING:  Apparent symbolic reference FILTER not resolved.
@@ -25,33 +25,64 @@
  *
  *   Date     	User    Brief Comment
  *   ---------	------  --------------------------------------
- *   18AUG2025	bmills	Initial creation of export_concept_rules_expanded.sas with Corey Kozak
+ *   18AUG2025	bmills	Initial creation of export_concept_rules_expanded.sas
+ *   21AUG2025  lwright modified for Modeling Prod
  *   12JAN2026  lwright added code to find CDR in concept of interest that matches text string
+ *   28JAN2026  lwright added error handling when no initial match
+ *   03MAR2026  lwright added code to also find CDRs of PREDICATE_RULE and SEQUENCE from out_fact table
+ *   05MAR2026  lwright remove MODEL ds writing to WORK
 \******************************************************************************/
 /******** CONTENTS ********/
 /* 
 Section 1 - user populated macro variables
-Section 2 - export VTA project from SAS Model Studio using API
+Section 2 - export VTA project
 Section 3 - subset source data to single obs and move to CASUSER
 Section 4 - create initial model file, capture macvars, create shell
-Section 5 - split custom concept and score with recursive macro, until terminal nodes reached (think decision tree)
-Section 6 - output CDRs to table and print
+Section 5 - split custom concept and score with recursive macro, until terminal node reached (think decision tree)
+Section 6 - output CDR(s) to table and print
 Section 7 - clean up CASUSER, WORK and CASLIBS
 */
+/* ******* NOTICE: ******* */
+/* the value for the text_variable_name must not contain spaces */
+/* the unique_row_id_name variable must be of data type character */
+/* hence the unique_row_id_value will be of data type character */
 
 /******** SECTION 1 ********/
-/* USER ASSIGNED macvars */
-%let sas_project_name=%str(Color_Project); 
-%let target_concept = %str(T_COLOR); 
-%let target_text = %str(blue); 
-%let datacaslib=%str(CASUSER); 
-%let datatablename=%str(DS_COLOR); 
-%let rowid = %str(435-5-80); 
+/* USER ASSIGNED macro variables */
 
-/* configure CAS session containing caslib for source data */
-options cashost="<sas-cas-server-xxxx>" casport=<####> casdatalimit=ALL;
-cas;
-caslib _all_ assign;
+/* VTA Project Information */
+%let sas_project_name = %upcase(color_project); *value is not case sensitive;
+
+/* configure CAS session; must assign the caslib containing your VTA project source data */
+%let cas_host = %str(sas-cas-server-xxxxxxxxxxxxx);
+    options cashost="&cas_host" casport=5570 casdatalimit=ALL;
+    cas;
+    caslib _all_ assign;
+
+/* Data Source Information */
+%let datacaslib=%str(vtadata); *caslib for original VTA project source data;
+
+/* use OPTIONAL CODE on lines 68-72 if you need to modify your original source data to comply with requirements, see NOTICE section above */
+/* change unique_row_id_name data type from num to char and/or remove spaces in text_variable_name */
+/* replace existing values, 'textvar with spaces'n and rowid_num, in code below with values from your source data */
+/* otherwise insert name of original data set name on line 75 */
+/* %let orig_tablename=%str(ds_color);  */
+/* data &datacaslib..ds_color_final; */
+/*     set &datacaslib..&orig_tablename(rename=('textvar with spaces'n=textvarnospaces)); *remove spaces in text variable name; */
+/*     rowid_char=put(rowid_num,3.); *convert to data type char; *format must match values; */
+/* run; */
+/* end of OPTIONAL CODE */
+
+%let datatablename=%str(ds_color); *version of data set, with observation containing matched_text, and meeting requirements;
+%let text_variable_name = %str(pagetext); *see NOTICE section;
+%let unique_row_id_name = %str(rowid); *see NOTICE section;
+
+/* Search Criteria */
+%let matched_text = %upcase(blue); *value is not case sensitive;
+%let unique_row_id_value = %str(435-5-80); *see NOTICE section;
+%let search_concept = %upcase(t_color); *value is not case sensitive;
+
+/* END of USER edits */
 
 /******** SECTION 2 ********/
 /* EXPORT the contents of &sas_project_name to a SAS dataset */
@@ -82,7 +113,7 @@ run;
 /*Add filter for specific project of interest*/
 data proj_filter;
 	set projs.items;
-    if name="&sas_project_name." then output;
+    if upcase(name)="&sas_project_name." then output;
 run;
 
 /*Get the count of the VTA projects to Loop through  */
@@ -331,11 +362,11 @@ data casuser.concepts_expand;
 run;
 
 /******** SECTION 3 ********/
-/* SUBSET source data to observation of interest and move to CASUSER */
+/* SUBSET source data to observation of interest and move to/keep in CASUSER */
 /*************************/
 data CASUSER.TEST_OBS;
     set &datacaslib..&datatablename;
-    where RowID = "&rowid";
+    where &unique_row_id_name. = "&unique_row_id_value.";
 run;
 
 /******** SECTION 4 ********/
@@ -402,7 +433,7 @@ run;
 /* find custom_concept_id of target concept to split */
 data _null_;
     set CASUSER.model;
-    if config = "ENABLE:&target_concept" then do;
+    if config = "ENABLE:&search_concept" then do;
         call symputx("custom_concept_num",custom_concept_id);
     end;
 run;    
@@ -443,64 +474,54 @@ run;
     ;
     quit;
     /* split target concept and count rows */
-    /* enumerate target concept rows */
-    data CONCEPTRULE_&custom_concept_num;
+    /* subset to target concept */
+    data CASUSER.CONCEPTRULE_&custom_concept_num;
         set CASUSER.&model_split (where=(custom_concept_id=&custom_concept_num));
-        rownum = _n_;
     run;
+    /* capture max number rows */
+    proc sql noprint;
+        select count(*) into :max_row 
+        from CASUSER.CONCEPTRULE_&custom_concept_num;
+    quit;
     /* split keeping top */
-    proc sql;
-        create table CONCEPTRULE_V1 as
-        select * 
-        from CONCEPTRULE_&custom_concept_num
-        having 
-            scan(config,1,":") in ('ENABLE','FULLPATH','PRIORITY','CASE_INSENSITIVE_MATCH','REMOVE_ITEM') 
-            or rownum <= (max(rownum) - (&nrows2split/2))
-    ;
-    quit;
+    data CASUSER.CONCEPTRULE_V1;
+        set CASUSER.CONCEPTRULE_&custom_concept_num; 
+        if scan(config,1,":") in ('ENABLE','FULLPATH','PRIORITY','CASE_INSENSITIVE_MATCH','REMOVE_ITEM') or
+        _n_ <= (&max_row - (&nrows2split/2)) then output;
+    run;    
     /* split keeping bottom */
-    proc sql;
-        create table CONCEPTRULE_V2 as
-        select * 
-        from CONCEPTRULE_&custom_concept_num
-        having 
-            scan(config,1,":") in ('ENABLE','FULLPATH','PRIORITY','CASE_INSENSITIVE_MATCH','REMOVE_ITEM') 
-            or rownum > (max(rownum) - (&nrows2split/2))
-    ;
-    quit;
+    data CASUSER.CONCEPTRULE_V2;
+        set CASUSER.CONCEPTRULE_&custom_concept_num;
+        if scan(config,1,":") in ('ENABLE','FULLPATH','PRIORITY','CASE_INSENSITIVE_MATCH','REMOVE_ITEM') or
+        _n_ > (&max_row - (&nrows2split/2)) then output;
+    run;
     /* count all rows in each */
     proc sql noprint;
         select count(*) into :rowsv1
-        from CONCEPTRULE_V1
+        from CASUSER.CONCEPTRULE_V1
     ;
     quit;
     proc sql noprint;
         select count(*) into :rowsv2
-        from CONCEPTRULE_V2
+        from CASUSER.CONCEPTRULE_V2
     ;
     quit;
     /* create two new model files without target concept, one for each half */
-    data &model_split.1;
+    data CASUSER.&model_split.1;
         set CASUSER.&model_split;
         if custom_concept_id=&custom_concept_num then delete;
     run;
-    data &model_split.2;
-        set work.&model_split.1;
+    data CASUSER.&model_split.2;
+        set CASUSER.&model_split.1;
     run;
-    /* Add back target concept and load to CASUSER */
+    /* Add back target concept */
     /* first for top */
-    proc append base=work.&model_split.1 data=work.CONCEPTRULE_V1 (drop=rownum);
-    run;
-    proc casutil;
-        load data=WORK.&model_split.1 outcaslib="CASUSER"
-        casout="&model_split.1" replace;
-    run;
+    data CASUSER.&model_split.1 (append=yes);
+		set CASUSER.CONCEPTRULE_V1;
+	run;
     /* then for bottom */
-    proc append base=work.&model_split.2 data=work.CONCEPTRULE_V2 (drop=rownum);
-    run;
-    proc casutil;
-        load data=WORK.&model_split.2 outcaslib="CASUSER"
-        casout="&model_split.2" replace;
+    data CASUSER.&model_split.2 (append=yes);
+        set CASUSER.CONCEPTRULE_V2;
     run;
     /******** SECTION ********/
     /* Create new model liti files and score data */
@@ -545,70 +566,71 @@ run;
     proc cas;
         textRuleScore.applyConcept /
             casOut={name="out_concept1", replace=TRUE}
-            docId="rowid"
+            docId="&unique_row_id_name"
             factOut={name="out_fact1", replace=TRUE}
             model={name="outli_v1"}
             language='en'
             table={name="test_obs"}
-            text="pagetext";
+            text="&text_variable_name.";
     run;
     /*Score against bottom  */
     proc cas;
         textRuleScore.applyConcept /
             casOut={name="out_concept2", replace=TRUE}
-            docId="rowid"
+            docId="&unique_row_id_name"
             factOut={name="out_fact2", replace=TRUE}
             model={name="outli_v2"}
             language='en'
             table={name="test_obs"}
-            text="pagetext";
+            text="&text_variable_name.";
     run;
     /* find rows that match in top by combining results tables */
     data casuser.new_out_concept1;
     set casuser.out_concept1;
-    if strip(_concept_) ="&target_concept" and _match_text_="&target_text";
+    if upcase(strip(_concept_)) ="&search_concept" and upcase(_match_text_)="&matched_text";
     drop _path_ _start_ _end_ _canonical_form_;
     run;
     /* Rename _FACT_ as _CONCEPT_ as prep for joining results tables */
     data casuser.new_out_fact1;
     set casuser.out_fact1;
     /* if missing(_fact_argument_); */
-    if strip(_fact_) ="&target_concept" and _match_text_="&target_text";
+    if upcase(strip(_fact_)) ="&search_concept" and upcase(_match_text_)="&matched_text";
     drop _result_id_ _fact_argument_ _start_ _end_ _path_;
     rename _fact_=_concept_;
     run;
     /* Create new table of results */
-    data match1;
+    data casuser.match1;
     set casuser.new_out_concept1 casuser.new_out_fact1;
     run;
     /* count obs that match in top */
     proc sql noprint;
         select count(*) into :match_cnt1
-        from match1
+        from casuser.match1
         ;
     quit;
+%put &=match_cnt1;
     /* find rows that match in bottom by combining results tables */
     data casuser.new_out_concept2;
     set casuser.out_concept2;
-    if strip(_concept_) ="&target_concept" and _match_text_="&target_text";
+    if upcase(strip(_concept_)) ="&search_concept" and upcase(_match_text_)="&matched_text";
     drop _path_ _start_ _end_ _canonical_form_;
     run;
     /* Rename _FACT_ as _CONCEPT_ as prep for joining results tables */
     data casuser.new_out_fact2;
     set casuser.out_fact2;
     /* if missing(_fact_argument_); */
-    if strip(_fact_) ="&target_concept" and _match_text_="&target_text";
+    if upcase(strip(_fact_)) ="&search_concept" and upcase(_match_text_)="&matched_text";
     drop _result_id_ _fact_argument_ _start_ _end_ _path_;
     rename _fact_=_concept_;
     run;
     /* Create new table of results */
-    data match2;
+    data casuser.match2;
     set casuser.new_out_concept2 casuser.new_out_fact2;
     run;
     /* count obs that match in bottom */
     proc sql noprint;
         select count(*) into :match_cnt2
-        from match2
+        from casuser.match2
         ;
     quit;
     proc sql;
@@ -643,7 +665,7 @@ run;
 %split_concept(model);
 
 /******** SECTION 6 ********/
-/* output CDRs to table and print */
+/* output CDR(s) to table and print */
 /*************************/
 /* reinstate output to Results tab */
 ods select all;
@@ -661,12 +683,13 @@ data _null_;
         call symputx('rule_cnt', _N_);
   end;
 run;
+%put &=rule_cnt;
 data _null_;
     /* check if any matches exist */
     if 0 then set params_sub nobs=n;
     if n=0 then do;
         put "ERROR: Macro variable does not exist";
-        put "ERROR: therefore no matches for text string &target_text in custom concept &target_concept found.";
+        put "ERROR: therefore no matches for text string &matched_text in custom concept &search_concept found.";
         abort; /* Stops the current program/step gracefully */
     end;
 run;
@@ -675,15 +698,15 @@ run;
   data matching_rules (drop= config custom_concept_id);
     length CDR $ 255;
     set %do i = 1 %to &end; 
-      &&rule_&i.
+      CASUSER.&&rule_&i.
     %end;
     ; /* <-- this semicolon ends the SET statement */
     if custom_concept_id = &custom_concept_num;
     if scan(config,1,":") in ('ENABLE','FULLPATH','PRIORITY','CASE_INSENSITIVE_MATCH','REMOVE_ITEM')
     then delete;
     if scan(config,1,":") in ('PREDICATE_RULE','SEQUENCE')
-    then CDR = transtrn(config, "&target_concept.", trimn(''));
-    else CDR = transtrn(config, "&target_concept.:", trimn(''));
+    then CDR = transtrn(config, "&search_concept.", trimn(''));
+    else CDR = transtrn(config, "&search_concept.:", trimn(''));
   run;
 %mend;
 /* CALL macro program */
@@ -692,9 +715,9 @@ run;
 /* PRINT table containing rule(s) */
 title;title1;title2;title3;title4;
 proc print data=matching_rules noobs;
-    title1 j=l "The CDRs in custom concept '&target_concept'";
-    title2 j=l "within the VTA project '&sas_project_name'";
-    title3 j=l "matching the text '&target_text' in rowID '&rowid'";
+    title1 j=l "The CDRs in custom concept ==> &search_concept";
+    title2 j=l "for the VTA project ==> &sas_project_name";
+    title3 j=l "matching the text '&matched_text' in &unique_row_id_name = &unique_row_id_value";
     title4 j=l "is shown below:";
 run;
 data _null_;
@@ -705,19 +728,19 @@ run;
 /******** clean up *******/
 /*************************/
 /* CLEAR WORK */
-/* proc datasets library=work nolist; */
-/*     delete concept: model: match1 match2 params: proj_filter tax_c; */
-/* quit; run; */
+proc datasets library=work nolist;
+    delete concept: params: proj_filter tax_c;
+quit; run;
 /* CLEAR CASUSER */
-/* proc datasets library=casuser nolist; */
-/*     delete c_rule: concept: error: model: new: out: test_obs; */
-/* quit; run; */
+proc datasets library=casuser nolist;
+    delete c_rule: concept: error: match: model: new: out: test_obs;
+quit; run;
 /* CLEAR caslibs */
-/* filename c_rule clear; libname c_rule clear; */
-/* filename c_url clear; libname c_url clear; */
-/* filename pipes clear; libname pipes clear; */
-/* filename prj_data clear; libname prj_data clear; */
-/* filename prj_pipe clear; libname prj_pipe clear; */
-/* filename projs clear; libname projs clear; */
+filename c_rule clear; libname c_rule clear;
+filename c_url clear; libname c_url clear;
+filename pipes clear; libname pipes clear;
+filename prj_data clear; libname prj_data clear;
+filename prj_pipe clear; libname prj_pipe clear;
+filename projs clear; libname projs clear;
 
 /* end of code */
