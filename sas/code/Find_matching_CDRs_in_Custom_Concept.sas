@@ -31,6 +31,7 @@
  *   28JAN2026  lwright added error handling when no initial match
  *   03MAR2026  lwright added code to also find CDRs of PREDICATE_RULE and SEQUENCE from out_fact table
  *   05MAR2026  lwright remove MODEL ds writing to WORK
+ *	 24APR2026	lwright section 5 remove use of _n_ to enumerate rows
 \******************************************************************************/
 /******** CONTENTS ********/
 /* 
@@ -483,17 +484,30 @@ run;
         select count(*) into :max_row 
         from CASUSER.CONCEPTRULE_&custom_concept_num;
     quit;
+	/* ennumerate rows since _n_ is based on data step iteration */
+    proc sql noprint;
+		create table want as
+		select  monotonic() as rowNo, *
+		from CASUSER.CONCEPTRULE_&custom_concept_num;
+    quit;
+    /* reassign data type from char in work to varchar in casuser */
+    data casuser.want (rename=(config2=config));
+        length config2 varchar(*);
+        set work.want;
+        config2 = config;
+        drop config;
+    run;
     /* split keeping top */
     data CASUSER.CONCEPTRULE_V1;
-        set CASUSER.CONCEPTRULE_&custom_concept_num; 
+        set CASUSER.want; 
         if scan(config,1,":") in ('ENABLE','FULLPATH','PRIORITY','CASE_INSENSITIVE_MATCH','REMOVE_ITEM') or
-        _n_ <= (&max_row - (&nrows2split/2)) then output;
+        rowNo <= (&max_row - (&nrows2split/2)) then output;
     run;    
     /* split keeping bottom */
     data CASUSER.CONCEPTRULE_V2;
-        set CASUSER.CONCEPTRULE_&custom_concept_num;
+        set CASUSER.want;
         if scan(config,1,":") in ('ENABLE','FULLPATH','PRIORITY','CASE_INSENSITIVE_MATCH','REMOVE_ITEM') or
-        _n_ > (&max_row - (&nrows2split/2)) then output;
+        rowNo > (&max_row - (&nrows2split/2)) then output;
     run;
     /* count all rows in each */
     proc sql noprint;
@@ -517,11 +531,11 @@ run;
     /* Add back target concept */
     /* first for top */
     data CASUSER.&model_split.1 (append=yes);
-		set CASUSER.CONCEPTRULE_V1;
+		set CASUSER.CONCEPTRULE_V1 (drop=rowNo);
 	run;
     /* then for bottom */
     data CASUSER.&model_split.2 (append=yes);
-        set CASUSER.CONCEPTRULE_V2;
+        set CASUSER.CONCEPTRULE_V2 (drop=rowNo);
     run;
     /******** SECTION ********/
     /* Create new model liti files and score data */
